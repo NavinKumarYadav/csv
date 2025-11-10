@@ -1,19 +1,15 @@
 package com.cleanfile.csv.service;
 
-
-import org.apache.commons.csv.CSVFormat;
-import org.apache.commons.csv.CSVParser;
-import org.apache.commons.csv.CSVPrinter;
-import org.apache.commons.csv.CSVRecord;
+import org.apache.commons.csv.*;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.springframework.stereotype.Service;
 
 import java.io.Reader;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 @Service
 public class CsvCleanerService {
@@ -71,80 +67,116 @@ public class CsvCleanerService {
             Map.entry("PR00000040", "Codename Lake & Bloom")
     );
 
+    private final Map<String, Integer> phoneLookup = loadPhoneLookup();
 
+    private Map<String, Integer> loadPhoneLookup() {
+        Map<String, Integer> lookup = new HashMap<>();
+        try {
+            String jsonText = Files.readString(Paths.get("src/main/resources/phone_data.json"));
+            JSONArray arr = new JSONArray(jsonText);
 
-    public void cleanCsv(){
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.getJSONObject(i);
+                int id = obj.getInt("ID");
+                String phone = obj.getString("PHONE_NUMBER").replaceAll("[^0-9]", "");
+                if (phone.length() > 10) phone = phone.substring(phone.length() - 10);
+                lookup.put("+91" + phone, id);
+            }
+        } catch (Exception ignored) {}
+        return lookup;
+    }
+
+    public void cleanCsv() {
         String inputFile = "src/main/resources/assignment_1.csv";
         String outputFile = "src/main/resources/cleaned_assignment_1.csv";
 
-        try(
+        try (
                 Reader reader = Files.newBufferedReader(Paths.get(inputFile));
                 CSVParser parser = new CSVParser(reader, CSVFormat.DEFAULT.withFirstRecordAsHeader());
                 Writer writer = Files.newBufferedWriter(Paths.get(outputFile));
                 CSVPrinter printer = new CSVPrinter(writer, CSVFormat.DEFAULT
-                        .withHeader("partner", "assigned_user", "productId", "name", "phone_number", "email", "stage",
-                                "status", "created_date", "activity_json" ))
-        ){
-            Map<String, Integer> headerMap = parser.getHeaderMap();
-            Set<String> seenProducts = new HashSet<>();
+                        .withQuoteMode(QuoteMode.ALL)
+                        .withHeader("partner","assigned_user","productId","name","phone_number","email","stage","status","created_date","activity_json"))
+        ) {
+            Set<String> seen = new HashSet<>();
+            Map<String,Integer> headerMap = parser.getHeaderMap();
 
-            for (CSVRecord record : parser){
-                String partner = cleanPartner(record.get(headerKey(headerMap, "partner")));
-                String assignedUser = cleanAssignedUser(record.get(headerKey(headerMap, "assigned_user")));
+            for (CSVRecord record : parser) {
+
+                String partner = mapUser(record.get(headerKey(headerMap,"partner")), true);
+                String assigned = mapUser(record.get(headerKey(headerMap,"assigned_user")), false);
+
                 String productId = mapProduct(record.get(headerKey(headerMap, "productId")));
-                String name = cleanName(record.get(headerKey(headerMap, "name")));
-                String phone = cleanPhone(record.get(headerKey(headerMap, "phone_number")));
-                String email = record.get(headerKey(headerMap, "email"));
-                String stage = mapStage(record.get(headerKey(headerMap, "stage")));
-                String status = mapStatus(record.get(headerKey(headerMap, "status")));
-                String createdDate = record.get(headerKey(headerMap, "created_date"));
-                String activity = mapActivity(record.get(headerKey(headerMap, "activity_json")));
+                String name = cleanName(record.get(headerKey(headerMap,"name")));
+                String phoneRaw = record.get(headerKey(headerMap,"phone_number"));
+                String phone = formatPhone(phoneRaw);
 
-                if(phone.isBlank() || productId == null || productId.isBlank()) continue;
+                if (phone.isEmpty() || productId.isBlank()) continue;
 
-                String uniqueKey = productId + "-" + phone;
-                if (seenProducts.contains(uniqueKey)) continue;
-                seenProducts.add(uniqueKey);
+                String unique = productId + "-" + phone;
+                if (!seen.add(unique)) continue;
 
-                printer.printRecord(partner, assignedUser, productId, name, phone, email, stage,
-                        status, createdDate, activity);
+                printer.printRecord(
+                        partner,
+                        assigned,
+                        productId,
+                        name,
+                        phone,
+                        record.get(headerKey(headerMap, "email")),
+                        record.get(headerKey(headerMap, "stage")),
+                        record.get(headerKey(headerMap, "status")),
+                        record.get(headerKey(headerMap, "created_date")),
+                        record.get(headerKey(headerMap, "activity_json"))
+                );
             }
 
-            System.out.println("✅ Cleaned CSV created successfully at: " + outputFile);
+            System.out.println("Cleaned CSV generated → " + outputFile);
 
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private String headerKey(Map<String, Integer> headerMap, String expected) {
-        for (String key : headerMap.keySet()) {
-            if (key.trim().equalsIgnoreCase(expected.trim())
-                    || key.replaceAll("[^a-zA-Z]", "").equalsIgnoreCase(expected
-                    .replaceAll("[^a-zA-Z]", ""))) {
-                return key;
-            }
+    private String headerKey(Map<String, Integer> map, String expected) {
+
+        String normalizedExpected = expected.replaceAll("[^a-zA-Z_]", "").trim();
+
+        return map.keySet().stream()
+                .filter(original -> {
+                    String cleaned = original
+                            .replace("\uFEFF", "")
+                            .replace("\"", "")
+                            .replaceAll("[^a-zA-Z_]", "")
+                            .trim();
+                    return cleaned.equalsIgnoreCase(normalizedExpected);
+                })
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Mapping for " + normalizedExpected + " not found, expected one of " + map.keySet()
+                ));
+    }
+    
+    private String mapUser(String value, boolean isPartner) {
+        if (value == null || value.isBlank()) {
+            return isPartner ? "client_nocode" : "Unassigned";
         }
-        System.out.println("Available headers: " + headerMap.keySet());
-        throw new IllegalArgumentException("Header not found for: " + expected);
+
+        value = value.replaceAll("[^0-9]", "");
+
+        if (value.length() > 10) value = value.substring(value.length() - 10);
+        if (value.length() != 10) return isPartner ? "client_nocode" : "Unassigned";
+
+        String formatted = "+91" + value;
+        Integer id = phoneLookup.get(formatted);
+
+        return id != null ? id.toString() : formatted;
     }
 
-
-
-    private String cleanPhone(String phone){
-        if (phone == null || phone.isBlank()) return "";
+    private String formatPhone(String phone) {
+        if (phone == null) return "";
         phone = phone.replaceAll("[^0-9]", "");
-        if (phone.startsWith("91") && phone.length() > 10) {
-            phone = phone.substring(phone.length() - 10);
-        } else if (phone.startsWith("0") && phone.length() > 10) {
-            phone = phone.substring(phone.length() - 10);
-        }
-
-        if (phone.length() < 10) return "";
-
-        phone = phone.substring(phone.length() - 10);
-
-        return "+91" + phone;
+        if (phone.length() > 10) phone = phone.substring(phone.length() - 10);
+        return phone.length() == 10 ? "+91" + phone : "";
     }
 
     private String cleanName(String name){
@@ -159,55 +191,14 @@ public class CsvCleanerService {
         return name.isBlank() ? "New Customer" : name;
     }
 
-    private String cleanPartner(String partner){
-        if(partner == null || partner.isBlank())  return "client_nocode";
-        return partner;
-    }
-
-    private String cleanAssignedUser(String user){
-        if (user == null || user.isBlank()) return "Unassigned";
-        return user;
-    }
-
-    private String mapProduct(String product){
-        if(product == null || product.isBlank()) return "";
-
-        if(product.matches("\\d+")){
-            product = "PR" + String.format("%08d", Integer.parseInt(product));
-        }
-
-        String projectName = newCsvProjects.getOrDefault(product.trim(), product.trim());
-
-        for(Map.Entry<Integer, String> entry : refProjects.entrySet()){
-            if(entry.getValue().equalsIgnoreCase(projectName)){
-                return String.valueOf(entry.getKey());
-            }
-        }
-        System.out.println("⚠ Unmapped product: " + projectName);
-        return projectName;
-    }
-
-    private String mapStage(String stage){
-        Map<String, String> stageMap = Map.of(
-                "dcrm_stage1", "leadzump_stage1",
-                "dcrm_stage2", "leadzump_stage2"
-        );
-        return stageMap.getOrDefault(stage, stage);
-    }
-
-    private String mapStatus(String status){
-        Map<String, String> statusMap = Map.of(
-                "dcrm_active", "leadzump_active",
-                "dcrm_closed", "leadzump_closed"
-        );
-        return statusMap.getOrDefault(status, status);
-    }
-
-    private String mapActivity(String activity){
-        Map<String, String> activityMap = Map.of(
-                "dcrm_call", "leadzump_call",
-                "dcrm_meeting", "leadzump_meeting"
-        );
-        return activityMap.getOrDefault(activity, activity);
+    private String mapProduct(String product) {
+        if (product == null || product.isBlank()) return "";
+        if (product.matches("\\d+")) product = "PR" + String.format("%08d", Integer.parseInt(product));
+        String project = newCsvProjects.getOrDefault(product, product);
+        return refProjects.entrySet().stream()
+                .filter(e -> e.getValue().equalsIgnoreCase(project))
+                .map(e -> String.valueOf(e.getKey()))
+                .findFirst()
+                .orElse(project);
     }
 }
